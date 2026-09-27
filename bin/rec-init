@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Start a new demo recording folder.
+#
+#   rec-init DIR ["Title"]
+#
+# Creates DIR/shots (one screenshot per step, NN.jpg or NN.png), DIR/audio
+# (NN.txt narration and NN.mp3 speech, written by rec-step) and a README.md
+# with an empty step table to fill in as you go.
+set -euo pipefail
+dir="${1:?usage: rec-init DIR [\"Title\"]}"
+title="${2:-$(basename "$dir")}"
+mkdir -p "$dir/shots" "$dir/audio"
+if [ ! -f "$dir/README.md" ]; then
+  cat > "$dir/README.md" <<EOF
+# $title: recorded demo
+
+$(date +%F). Build with \`rec-build\` in this folder; re-record one step with
+\`rec-step NN "text"\` (plus a new \`shots/NN.jpg\`) and build again.
+
+| # | Screen | Narration |
+|---|---|---|
+EOF
+fi
+printf '%s\n' "$(cd "$dir" && pwd)"

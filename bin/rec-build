@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Build the demo video from its steps: one still + one narration per step,
+# concatenated, with a matching subtitle file.
+#
+#   rec-build [-C DIR] [-o demo.mp4] [-s 1600x832]
+#
+# Needs DIR/shots/NN.jpg (or .png) and DIR/audio/NN.mp3 for every step, as
+# written by the driver and rec-step. Writes DIR/seg/ (per-step segments, safe
+# to delete), DIR/demo.mp4 and DIR/demo.srt (subtitles from audio/NN.txt).
+# Screenshots of different sizes are letterboxed onto one white canvas.
+# Uses ffmpeg when installed, otherwise REC_FFMPEG_IMAGE in Docker.
+set -euo pipefail
+dir="$PWD"; out="demo.mp4"; size="1600x832"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C) dir="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    -s) size="$2"; shift 2 ;;
+    *) echo "usage: rec-build [-C DIR] [-o demo.mp4] [-s 1600x832]" >&2; exit 2 ;;
+  esac
+done
+dir="$(cd "$dir" && pwd)"
+[[ "$size" =~ ^[0-9]+x[0-9]+$ ]] || { echo "rec-build: size must look like 1600x832" >&2; exit 2; }
+[[ "$out" =~ ^[A-Za-z0-9._-]+\.mp4$ ]] || { echo "rec-build: -o takes a file name ending in .mp4" >&2; exit 2; }
+
+# Check the steps here, where the error is readable, before starting ffmpeg.
+steps=()
+for a in "$dir"/audio/*.mp3; do
+  [ -e "$a" ] || { echo "rec-build: no audio/NN.mp3 in $dir (run rec-step first)" >&2; exit 1; }
+  n=$(basename "$a" .mp3)
+  if [ ! -f "$dir/shots/$n.jpg" ] && [ ! -f "$dir/shots/$n.png" ]; then
+    echo "rec-build: step $n has narration but no shots/$n.jpg or .png" >&2; exit 1
+  fi
+  steps+=("$n")
+done
+
+# Runs with the demo folder as /w, identically on the host and in Docker.
+inner='set -e; cd /w; W=${SIZE%x*}; H=${SIZE#*x}
+mkdir -p seg; : > seg/list.txt; : > "${OUT%.mp4}.srt"; t=0; i=0
+for n in $STEPS; do
+  shot=shots/$n.jpg; [ -f "$shot" ] || shot=shots/$n.png
+  ffmpeg -hide_banner -loglevel error -y -loop 1 -i "$shot" -i "audio/$n.mp3" \
+    -vf "scale=$W:$H:force_original_aspect_ratio=decrease,pad=$W:$H:(ow-iw)/2:(oh-ih)/2:white,format=yuv420p" \
+    -c:v libx264 -tune stillimage -r 10 -c:a aac -b:a 128k -af apad=pad_dur=1 -shortest "seg/$n.mp4"
+  echo "file '\''$n.mp4'\''" >> seg/list.txt
+  d=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "seg/$n.mp4")
+  i=$((i+1))
+  awk -v i=$i -v a=$t -v d=$d -v f="audio/$n.txt" "function ts(x,  h,m,sec,r){h=int(x/3600);m=int(x%3600/60);sec=x-h*3600-m*60;r=sprintf(\"%02d:%02d:%06.3f\",h,m,sec);sub(/\\./,\",\",r);return r}
+    BEGIN{b=a+d-1; if(b<a)b=a+d; txt=\"\"; while((getline l<f)>0) txt=txt (txt?\" \":\"\") l
+    printf \"%d\\n%s --> %s\\n%s\\n\\n\",i,ts(a),ts(b),txt}" >> "${OUT%.mp4}.srt"
+  t=$(awk -v a=$t -v d=$d "BEGIN{print a+d}")
+done
+ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i seg/list.txt -c copy "$OUT"'
+
+export SIZE="$size" OUT="$out" STEPS="${steps[*]}"
+if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+  mkdir -p /tmp/rec-build.$$ && ln -sfn "$dir" /tmp/rec-build.$$/w
+  sh -c "${inner//\/w/\/tmp\/rec-build.$$\/w}"; rm -rf /tmp/rec-build.$$
+else
+  docker run --rm -u "$(id -u):$(id -g)" -v "$dir":/w -e SIZE -e OUT -e STEPS \
+    --entrypoint sh "${REC_FFMPEG_IMAGE:-jrottenberg/ffmpeg:6.1-alpine}" -c "$inner"
+fi
+echo "$dir/$out (${#steps[@]} steps, subtitles in ${out%.mp4}.srt)"

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Narrate one step of a demo: save the text, render it to speech, speak it
+# live, and print how many seconds to wait before changing the screen.
+#
+#   rec-step [-C DIR] NN "narration"
+#
+# Writes DIR/audio/NN.txt and DIR/audio/NN.mp3 (DIR defaults to the current
+# directory). The screenshot for the step, DIR/shots/NN.jpg, is the driver's
+# job. Prints the clip length in whole seconds, plus one, on stdout.
+#
+# Environment:
+#   REC_TTS     edge (default) | espeak | silent   engine; edge falls back to
+#               espeak-ng when offline, silent writes quiet audio (for tests)
+#   REC_VOICE   Edge voice, default en-US-AvaMultilingualNeural
+#   REC_RATE    Edge rate, e.g. +10%  (default +0%)
+#   REC_LIVE    1 (default) speaks the step aloud through agentlabs-voice's
+#               voice-offer when it is installed; 0 records silently
+#   REC_FFMPEG_IMAGE  ffmpeg image when ffmpeg is not installed
+#               (default jrottenberg/ffmpeg:6.1-alpine)
+set -euo pipefail
+dir="$PWD"
+[ "${1:-}" = "-C" ] && { dir="$2"; shift 2; }
+n="${1:?usage: rec-step [-C DIR] NN \"narration\"}"; text="${2:?narration text required}"
+[[ "$n" =~ ^[0-9]{2,3}$ ]] || { echo "rec-step: step must be two or three digits, like 01" >&2; exit 2; }
+mkdir -p "$dir/audio"
+audio="$dir/audio"
+image="${REC_FFMPEG_IMAGE:-jrottenberg/ffmpeg:6.1-alpine}"
+
+# ffmpeg/ffprobe: installed, or the same tools from the container.
+ff() {  # ff <tool> <args...>, with $audio visible as /a
+  local tool="$1"; shift
+  if command -v "$tool" >/dev/null; then
+    "$tool" "${@//\/a\//$audio/}"
+  else
+    docker run --rm -u "$(id -u):$(id -g)" -v "$audio":/a --entrypoint "$tool" "$image" "$@"
+  fi
+}
+
+edge_bin() {
+  for c in "${REC_EDGE_TTS:-}" "$(command -v edge-tts || true)" "$HOME/.venvs/tts/bin/edge-tts"; do
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+printf '%s\n' "$text" > "$audio/$n.txt"
+rm -f "$audio/$n.mp3"
+engine="${REC_TTS:-edge}"
+if [ "$engine" = edge ]; then
+  if e=$(edge_bin) && "$e" --voice "${REC_VOICE:-en-US-AvaMultilingualNeural}" \
+       --rate="${REC_RATE:-+0%}" --text "$text" --write-media "$audio/$n.mp3" >/dev/null 2>&1; then
+    :
+  else
+    echo "rec-step: edge-tts unavailable or offline, falling back to espeak-ng" >&2
+    engine=espeak
+  fi
+fi
+case "$engine" in
+  edge) ;;
+  espeak)
+    command -v espeak-ng >/dev/null || { echo "rec-step: no TTS engine (install edge-tts or espeak-ng)" >&2; exit 1; }
+    espeak-ng -w "$audio/$n.wav" "$text"
+    ff ffmpeg -hide_banner -loglevel error -y -i "/a/$n.wav" "/a/$n.mp3"
+    rm -f "$audio/$n.wav" ;;
+  silent)
+    # About 15 characters a second, like speech.
+    secs=$(( ${#text} / 15 + 1 ))
+    ff ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=24000:cl=mono -t "$secs" "/a/$n.mp3" ;;
+  *) echo "rec-step: unknown REC_TTS=$engine" >&2; exit 2 ;;
+esac
+
+# Live: the person watching hears the step as it happens.
+if [ "${REC_LIVE:-1}" = 1 ] && [ "$engine" != silent ] && command -v voice-offer >/dev/null; then
+  voice-offer --force --text "$text" >/dev/null 2>&1 &
+fi
+
+ff ffprobe -v error -show_entries format=duration -of csv=p=0 "/a/$n.mp3" \
+  | awk '{ s = int($1); if ($1 > s) s++; print s + 1 }'
