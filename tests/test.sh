@@ -59,6 +59,8 @@ cat > "$a/scenes/02.svg" <<'SVG'
 <svg viewBox="0 0 1600 800" xmlns="http://www.w3.org/2000/svg">
   <rect data-at="boxes" data-anim="pop" x="200" y="300" width="300" height="120" fill="#2563eb"/>
   <path data-at="line" data-anim="draw" pathLength="1" d="M500 360 L1100 360" stroke="#111" stroke-width="4" fill="none"/>
+  <path id="track" d="M500 360 L1100 360" fill="none"/>
+  <circle data-at="line" data-anim="travel" data-path="#track" data-dur="1" data-delay="0.2" r="8" fill="red"/>
 </svg>
 SVG
 cat > "$a/steps.json" <<'JSON'

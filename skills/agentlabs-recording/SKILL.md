@@ -122,8 +122,13 @@ returns the same audio twice, and every cue hangs on its word times);
   screenshot itself.
 - **Scenes**: an SVG with `viewBox="0 0 1600 800"`; any element with
   `data-at="<word>"` appears when that word is said, `data-anim` `pop`,
-  `rise`, `fade` or `draw` (a path with `pathLength="1"` draws itself).
-  `data-at="0"` is there from the start.
+  `rise`, `fade` or `draw` (a path with `pathLength="1"` draws itself);
+  `data-delay` adds seconds after the word, to stagger a group. `travel`
+  moves an element (drawn at 0,0) along `data-path="#id"` over `data-dur`
+  seconds, then fades unless `data-stay`; `data-loop` keeps it going round,
+  for orbits and flows. `data-at="0"` is there from the start. For many
+  similar elements (particles, grids) write a small generator script beside
+  the scenes and keep it as part of the source.
 - **Sound**: whoosh on transitions, rise on title cards, click, tick on
   highlight moves, pop on scene elements (`"sfx": false` turns them off).
   `"music": "pad"` synthesises a soft bed, or name an audio file; it is

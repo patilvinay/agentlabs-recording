@@ -72,8 +72,17 @@ async function init(spec) {
     } else if (s.kind === 'scene') {
       el.innerHTML = s.svgText;
       const svg = el.querySelector('svg'); svg.setAttribute('width', W); svg.setAttribute('height', H);
-      s.parts = [...el.querySelectorAll('[data-at]')].map(e => ({ e, anim: e.dataset.anim || 'fade',
-        t: e.dataset.at === '0' ? 0 : cueTime(s, isNaN(+e.dataset.at) ? e.dataset.at : +e.dataset.at) }));
+      s.parts = [...el.querySelectorAll('[data-at]')].map(e => {
+        const d = e.dataset, at = d.at === '0' ? 0 : cueTime(s, isNaN(+d.at) ? d.at : +d.at);
+        const part = { e, anim: d.anim || 'fade', t: at + (+d.delay || 0) };
+        if (part.anim === 'travel') {
+          // moves along the path named by data-path over data-dur seconds (data-loop: round and round)
+          part.path = el.querySelector(d.path);
+          if (!part.path) throw new Error(`step ${s.n}: data-path "${d.path}" not found`);
+          part.len = part.path.getTotalLength(); part.dur = +d.dur || 1.5; part.loop = d.loop != null; part.stay = d.stay != null;
+        }
+        return part;
+      });
     } else {
       const img = new Image(); img.src = s.imgUrl; await img.decode();
       const iw = img.naturalWidth, ih = img.naturalHeight;
@@ -169,7 +178,17 @@ function drawShot(s, t) {
 }
 
 function drawScene(s, t) {
-  for (const { e, anim, t: t0 } of s.parts) {
+  for (const part of s.parts) {
+    const { e, anim, t: t0 } = part;
+    if (anim === 'travel') {
+      const q = (t - t0) / part.dur;
+      // a finished trip fades out unless data-stay
+      e.style.opacity = q < 0 ? 0 : part.loop || part.stay || q <= 1 ? 1 : 1 - clamp((q - 1) * part.dur / 0.3);
+      const f = part.loop ? ((q % 1) + 1) % 1 : clamp(q);
+      const pt = part.path.getPointAtLength(part.len * (part.loop ? f : ease(f) * 0.15 + f * 0.85));
+      e.setAttribute('transform', `translate(${pt.x},${pt.y})`);
+      continue;
+    }
     const p = clamp((t - t0) / (anim === 'draw' ? 0.8 : 0.6));
     if (anim === 'draw') { e.style.strokeDasharray = 1; e.style.strokeDashoffset = 1 - ease(p); continue; }
     e.style.opacity = p;
