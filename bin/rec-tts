@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Speak text with Edge TTS, writing the audio and the time each word is spoken.
+
+    rec-tts --voice V --rate R --text T --mp3 OUT.mp3 --words OUT.words.json
+
+Run by rec-step with the Python that has the edge_tts module (the one next
+to the edge-tts command). The word file is a list of {w, start, end} in
+seconds, punctuation kept from the text, which rec-animate cues against.
+"""
+import argparse, asyncio, json
+import edge_tts
+
+
+async def main(a):
+    words, audio = [], bytearray()
+    comm = edge_tts.Communicate(a.text, a.voice, rate=a.rate, boundary="WordBoundary")
+    async for chunk in comm.stream():
+        if chunk["type"] == "audio":
+            audio += chunk["data"]
+        elif chunk["type"] == "WordBoundary":
+            start = chunk["offset"] / 1e7  # 100 ns ticks
+            words.append({"w": chunk["text"], "start": round(start, 3),
+                          "end": round(start + chunk["duration"] / 1e7, 3)})
+    # Boundaries come without punctuation; take it back from the text.
+    pos = 0
+    for w in words:
+        i = a.text.find(w["w"], pos)
+        if i < 0:
+            continue
+        pos = i + len(w["w"])
+        while pos < len(a.text) and a.text[pos] in ".,!?:;":
+            w["w"] += a.text[pos]
+            pos += 1
+    open(a.mp3, "wb").write(audio)
+    json.dump(words, open(a.words, "w"), indent=1)
+
+
+p = argparse.ArgumentParser()
+for k in ("voice", "rate", "text", "mp3", "words"):
+    p.add_argument("--" + k, required=True)
+asyncio.run(main(p.parse_args()))

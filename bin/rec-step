@@ -4,7 +4,8 @@
 #
 #   rec-step [-C DIR] NN "narration"
 #
-# Writes DIR/audio/NN.txt and DIR/audio/NN.mp3 (DIR defaults to the current
+# Writes DIR/audio/NN.txt, NN.mp3 and NN.words.json, the time each word is
+# spoken (DIR defaults to the current
 # directory). The screenshot for the step, DIR/shots/NN.jpg, is the driver's
 # job. Prints the clip length in whole seconds, plus one, on stdout.
 #
@@ -13,6 +14,8 @@
 #               espeak-ng when offline, silent writes quiet audio (for tests)
 #   REC_VOICE   Edge voice, default en-US-AvaMultilingualNeural
 #   REC_RATE    Edge rate, e.g. +10%  (default +0%)
+#   REC_FORCE   1 renders the audio again even when the text is unchanged
+#               (by default unchanged text keeps its audio and word timings)
 #   REC_LIVE    1 (default) speaks the step aloud through agentlabs-voice's
 #               voice-offer when it is installed; 0 records silently
 #   REC_FFMPEG_IMAGE  ffmpeg image when ffmpeg is not installed
@@ -43,19 +46,36 @@ edge_bin() {
   return 1
 }
 
-printf '%s\n' "$text" > "$audio/$n.txt"
-rm -f "$audio/$n.mp3"
+voice="${REC_VOICE:-en-US-AvaMultilingualNeural}" rate="${REC_RATE:-+0%}"
 engine="${REC_TTS:-edge}"
-if [ "$engine" = edge ]; then
-  if e=$(edge_bin) && "$e" --voice "${REC_VOICE:-en-US-AvaMultilingualNeural}" \
-       --rate="${REC_RATE:-+0%}" --text "$text" --write-media "$audio/$n.mp3" >/dev/null 2>&1; then
+key="$engine $voice $rate"
+
+# Same text, same voice: keep the audio already rendered. A TTS service does
+# not return identical audio twice, and rec-animate times every animation to
+# these words, so re-rendering unchanged narration would shift a finished video.
+if [ "${REC_FORCE:-0}" != 1 ] && [ -s "$audio/$n.mp3" ] && [ -s "$audio/$n.words.json" ] \
+   && [ "$(cat "$audio/$n.txt" 2>/dev/null)" = "$text" ] && [ "$(cat "$audio/$n.key" 2>/dev/null)" = "$key" ]; then
+  fresh=0
+else
+  fresh=1
+  printf '%s\n' "$text" > "$audio/$n.txt"
+  rm -f "$audio/$n.mp3" "$audio/$n.words.json"
+fi
+
+if [ "$fresh" = 1 ] && [ "$engine" = edge ]; then
+  # The Python beside edge-tts also yields word timings; the plain CLI only audio.
+  if e=$(edge_bin) && py="$(dirname "$e")/python" && [ -x "$py" ] && "$py" -c 'import edge_tts' 2>/dev/null \
+     && "$py" "$(dirname "$(readlink -f "$0")")/rec-tts" --voice "$voice" --rate="$rate" --text "$text" \
+          --mp3 "$audio/$n.mp3" --words "$audio/$n.words.json" >/dev/null 2>&1; then
+    :
+  elif e=$(edge_bin) && "$e" --voice "$voice" --rate="$rate" --text "$text" --write-media "$audio/$n.mp3" >/dev/null 2>&1; then
     :
   else
     echo "rec-step: edge-tts unavailable or offline, falling back to espeak-ng" >&2
     engine=espeak
   fi
 fi
-case "$engine" in
+[ "$fresh" = 1 ] && case "$engine" in
   edge) ;;
   espeak)
     command -v espeak-ng >/dev/null || { echo "rec-step: no TTS engine (install edge-tts or espeak-ng)" >&2; exit 1; }
@@ -68,11 +88,27 @@ case "$engine" in
     ff ffmpeg -hide_banner -loglevel error -y -f lavfi -i anullsrc=r=24000:cl=mono -t "$secs" "/a/$n.mp3" ;;
   *) echo "rec-step: unknown REC_TTS=$engine" >&2; exit 2 ;;
 esac
+[ "$fresh" = 1 ] && printf '%s\n' "$engine $voice $rate" > "$audio/$n.key"
+
+dur=$(ff ffprobe -v error -show_entries format=duration -of csv=p=0 "/a/$n.mp3")
+
+# No word timings from this engine: spread the words over the clip by length,
+# close enough for cues, so rec-animate works with any engine.
+if [ ! -s "$audio/$n.words.json" ]; then
+  python3 - "$dur" "$text" > "$audio/$n.words.json" <<'PY'
+import json, sys
+dur, words = float(sys.argv[1]), sys.argv[2].split()
+span = max(dur - 0.3, 0.5); total = sum(len(w) + 1 for w in words); t = 0.1; out = []
+for w in words:
+    d = span * (len(w) + 1) / total
+    out.append({"w": w, "start": round(t, 3), "end": round(t + d * 0.9, 3)}); t += d
+json.dump(out, sys.stdout, indent=1)
+PY
+fi
 
 # Live: the person watching hears the step as it happens.
 if [ "${REC_LIVE:-1}" = 1 ] && [ "$engine" != silent ] && command -v voice-offer >/dev/null; then
   voice-offer --force --text "$text" >/dev/null 2>&1 &
 fi
 
-ff ffprobe -v error -show_entries format=duration -of csv=p=0 "/a/$n.mp3" \
-  | awk '{ s = int($1); if ($1 > s) s++; print s + 1 }'
+awk -v d="$dur" 'BEGIN { s = int(d); if (d > s) s++; print s + 1 }'
