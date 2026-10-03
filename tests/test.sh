@@ -39,4 +39,43 @@ grep -q 'Step 03. Something worth saying' "$d/demo.srt" || fail "subtitle text"
 rm "$d/shots/02.jpg"
 rec-build -C "$d" 2>/dev/null && fail "built with a missing screenshot"
 rec-build -C "$d" -o '../x.mp4' 2>/dev/null && fail "accepted an output path outside the folder"
-echo "ok: agentlabs-recording end to end"
+echo "ok: rec-build end to end"
+
+# rec-animate: title, scene and cued screenshot, sound and music; needs node + Chrome.
+if ! command -v node >/dev/null || [ ! -d "$REPO/lib/animate/node_modules/playwright-core" ]; then
+  echo "skip: rec-animate (run install.sh for node deps)"; exit 0
+fi
+a=$(rec-init "$tmp/anim" "Animated")
+ff ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=white:s=1200x700 -frames:v 1 /t/anim/shots/03.png
+rec-step -C "$a" 01 "An animated test." >/dev/null
+rec-step -C "$a" 02 "First the boxes, then the line." >/dev/null
+rec-step -C "$a" 03 "Zoom here, then click the button." >/dev/null
+[ -s "$a/audio/02.words.json" ] || fail "rec-step wrote no word timings"
+before=$(stat -c %Y "$a/audio/02.mp3"); sleep 1
+rec-step -C "$a" 02 "First the boxes, then the line." >/dev/null
+[ "$(stat -c %Y "$a/audio/02.mp3")" = "$before" ] || fail "unchanged narration was rendered again"
+mkdir -p "$a/scenes"
+cat > "$a/scenes/02.svg" <<'SVG'
+<svg viewBox="0 0 1600 800" xmlns="http://www.w3.org/2000/svg">
+  <rect data-at="boxes" data-anim="pop" x="200" y="300" width="300" height="120" fill="#2563eb"/>
+  <path data-at="line" data-anim="draw" pathLength="1" d="M500 360 L1100 360" stroke="#111" stroke-width="4" fill="none"/>
+</svg>
+SVG
+cat > "$a/steps.json" <<'JSON'
+{ "music": "pad", "steps": [
+  { "n": "01", "title": "Animated test", "subtitle": "rec-animate" },
+  { "n": "02", "svg": "scenes/02.svg", "chapter": "Scene" },
+  { "n": "03", "chapter": "Screenshot", "cursor": [100, 100], "cues": [
+    { "at": "Zoom", "zoom": [400, 200, 400, 200], "box": [400, 200, 400, 200] },
+    { "at": "click", "cursor": [600, 300] }, { "at": "button.", "click": true } ] } ] }
+JSON
+rec-animate -C "$a" >/dev/null 2>&1 || fail "rec-animate failed"
+info=$(ff ffprobe -v error -show_entries stream=codec_type,width,height -of csv=p=0 /t/anim/demo.mp4)
+grep -q '^video,1600,900' <<< "$info" && grep -q '^audio' <<< "$info" || fail "animated video streams: $info"
+[ "$(grep -c -- '-->' "$a/demo.srt")" = 3 ] || fail "animated subtitle count"
+rec-animate -C "$a" --only 1-2 >/dev/null 2>&1 && one=$(md5sum < "$a/preview.mp4")
+rec-animate -C "$a" --only 1-2 >/dev/null 2>&1 && [ "$(md5sum < "$a/preview.mp4")" = "$one" ] || fail "re-render differs"
+sed -i 's/"button."/"nowhere"/' "$a/steps.json"
+err=$(rec-animate -C "$a" 2>&1) && fail "built with a missing cue word"
+grep -q 'cue word "nowhere" is not in the narration' <<< "$err" || fail "missing cue word not reported: $err"
+echo "ok: rec-animate end to end"

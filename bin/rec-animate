@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Build an animated demo: camera moves, highlights, a cursor and clicks on the
+# screenshots, animated SVG scenes, title cards, chapter labels, karaoke
+# captions, sound effects and an optional music bed, every motion cued by
+# the word being spoken.
+#
+#   rec-animate [-C DIR] [-o demo.mp4] [--only FROM-TO]
+#
+# Reads DIR/steps.json (optional: without it every narrated step is a plain
+# screenshot with captions and cross-fades), DIR/scenes/*.svg, DIR/shots/NN.*
+# and DIR/audio/NN.{txt,mp3,words.json} from rec-step. Writes DIR/demo.mp4
+# and DIR/demo.srt. --only renders a stretch of seconds, for a quick look.
+# Needs node and Chrome (REC_CHROME to point at one); ffmpeg or Docker.
+set -euo pipefail
+dir="$PWD"
+[ "${1:-}" = "-C" ] && { dir="$2"; shift 2; }
+lib="${REC_LIB:-$(cd "$(dirname "$(readlink -f "$0")")/../lib/animate" 2>/dev/null && pwd || echo "$HOME/.local/share/agentlabs-recording/animate")}"
+[ -f "$lib/render.mjs" ] || lib="$HOME/.local/share/agentlabs-recording/animate"
+[ -d "$lib/node_modules/playwright-core" ] || { echo "rec-animate: run install.sh first (needs playwright-core in $lib)" >&2; exit 1; }
+command -v node >/dev/null || { echo "rec-animate: node is required" >&2; exit 1; }
+exec node "$lib/render.mjs" "$dir" "$@"

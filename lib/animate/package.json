@@ -1,0 +1,7 @@
+{
+  "name": "agentlabs-recording-animate",
+  "private": true,
+  "type": "module",
+  "description": "Frame renderer for rec-animate",
+  "dependencies": { "playwright-core": "^1.56.0" }
+}

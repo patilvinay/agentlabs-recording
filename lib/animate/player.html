@@ -1,0 +1,230 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<!--
+  Draws any frame of an animated demo from its time alone (seek(T)), so frames
+  can be rendered in any order, in parallel, and identically every time.
+  render.mjs loads this page, calls init(spec) once, then seek(T) per frame.
+-->
+<style>
+  :root { --accent: #2563eb; --hl: #f59e0b; }
+  html, body { margin: 0; overflow: hidden; background: #fff; font-family: Inter, 'Segoe UI', Roboto, sans-serif; }
+  .layer { position: absolute; left: 0; top: 0; overflow: hidden; background: #fff; }
+  .cam { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .cam img { display: block; }
+  .ov { position: absolute; left: 0; top: 0; overflow: visible; }
+  .title { display: flex; flex-direction: column; align-items: center; justify-content: center;
+           background: radial-gradient(ellipse at 30% 20%, #1e3a8a 0%, #0f172a 70%); color: #f8fafc; }
+  .title h1 { margin: 0; font-size: 72px; font-weight: 800; letter-spacing: -1px; }
+  .title p { margin: 22px 0 0; font-size: 30px; color: #cbd5e1; }
+  .title .bar { height: 6px; background: var(--accent); border-radius: 3px; margin-top: 30px; }
+  .title .dots { position: absolute; inset: 0; }
+  .chap { position: absolute; left: 40px; bottom: 36px; display: flex; align-items: stretch;
+          box-shadow: 0 10px 30px rgba(15,23,42,.25); border-radius: 10px; overflow: hidden; }
+  .chap b { background: var(--accent); color: #fff; font-size: 22px; padding: 12px 16px; }
+  .chap span { background: #0f172a; color: #f8fafc; font-size: 22px; padding: 12px 20px; white-space: nowrap; }
+  #cap { position: absolute; left: 0; display: flex; align-items: center; justify-content: center;
+         padding: 0 60px; box-sizing: border-box; background: #0f172a; text-align: center;
+         font-size: 28px; line-height: 1.3; color: #475569; }
+  #cap b { font-weight: 500; color: #f8fafc; }
+  #cap i { font-style: normal; color: #facc15; font-weight: 600; }
+  #prog { position: absolute; left: 0; height: 4px; background: var(--accent); }
+  [data-anim] { transform-box: fill-box; transform-origin: center; }
+</style></head>
+<body><div id="stage"></div><div id="cap"></div><div id="prog"></div>
+<script>
+const FADE = 0.5, MOVE = 0.9, CURSOR = 0.6;
+const ease = p => p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2;
+const back = p => { const c = 1.7; return 1 + (c+1)*Math.pow(p-1,3) + c*Math.pow(p-1,2); };
+const clamp = (v, a=0, b=1) => Math.max(a, Math.min(b, v));
+const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let S = null, W = 0, H = 0;
+
+// "Create#2" -> when the 2nd "Create" is spoken; a number is seconds into the step.
+function cueTime(s, at) {
+  if (typeof at === 'number') return at;
+  const [w, nth] = String(at).split('#'); let k = +(nth || 1);
+  for (const x of s.words) if (norm(x.w) === norm(w) && --k === 0) return x.start;
+  throw new Error(`step ${s.n}: cue word "${at}" is not in the narration`);
+}
+
+async function init(spec) {
+  S = spec; W = spec.width; H = spec.height - (spec.captions ? spec.capH : 0);
+  document.body.style.width = spec.width + 'px'; document.body.style.height = spec.height + 'px';
+  const cap = document.getElementById('cap'), prog = document.getElementById('prog');
+  Object.assign(cap.style, { top: H + 'px', width: W + 'px', height: spec.capH + 'px', display: spec.captions ? 'flex' : 'none' });
+  Object.assign(prog.style, { top: (spec.captions ? H : spec.height - 4) + 'px', display: spec.progress ? 'block' : 'none' });
+  const stage = document.getElementById('stage');
+  for (const s of spec.steps) {
+    const el = document.createElement('div'); el.className = 'layer';
+    Object.assign(el.style, { width: W + 'px', height: H + 'px' });
+    stage.appendChild(el); s.el = el;
+    if (s.kind === 'title') {
+      el.classList.add('title');
+      el.innerHTML = `<svg class="dots" width="${W}" height="${H}"></svg><h1>${esc(s.title || '')}</h1>
+        <p>${esc(s.subtitle || '')}</p><div class="bar"></div>`;
+      // Fixed pattern of drifting dots, placed by index (no randomness: re-renders match).
+      const g = el.querySelector('.dots');
+      g.innerHTML = Array.from({ length: 40 }, (_, i) =>
+        `<circle r="${2 + (i * 7) % 5}" fill="rgba(147,197,253,${0.08 + ((i * 13) % 10) / 60})"/>`).join('');
+      s.dots = [...g.children];
+      s.h1 = el.querySelector('h1'); s.sub = el.querySelector('p'); s.bar = el.querySelector('.bar');
+    } else if (s.kind === 'scene') {
+      el.innerHTML = s.svgText;
+      const svg = el.querySelector('svg'); svg.setAttribute('width', W); svg.setAttribute('height', H);
+      s.parts = [...el.querySelectorAll('[data-at]')].map(e => ({ e, anim: e.dataset.anim || 'fade',
+        t: e.dataset.at === '0' ? 0 : cueTime(s, isNaN(+e.dataset.at) ? e.dataset.at : +e.dataset.at) }));
+    } else {
+      const img = new Image(); img.src = s.imgUrl; await img.decode();
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      s.size = [iw, ih]; s.fit = Math.min(W / iw, H / ih);
+      el.innerHTML = `<div class="cam"><img src="${s.imgUrl}" width="${iw}" height="${ih}">
+        <svg class="ov" width="${iw}" height="${ih}">
+          ${(s.patch || []).map(([x, y, w, h, f]) => typeof f === 'number'
+            // cover a cursor baked into the screenshot with the strip f pixels to the side
+            ? `<svg x="${x}" y="${y}" width="${w}" height="${h}" viewBox="${x + f} ${y} ${w} ${h}"><image href="${s.imgUrl}" width="${iw}" height="${ih}"/></svg>`
+            : `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${esc(f)}"/>`).join('')}
+          <rect class="hl" rx="8" fill="rgba(250,204,21,.12)" stroke="${spec.highlight}" stroke-width="4"/>
+          <text class="lb" font-size="22" font-weight="700" fill="#b45309"></text>
+          <circle class="rip" fill="none" stroke="${spec.accent}" stroke-width="4"/>
+          <path class="cur" d="M0 0 L0 30 L8 23 L14 36 L20 33 L14 21 L24 21 Z" fill="#111" stroke="#fff" stroke-width="2"/>
+        </svg></div>`;
+      s.cam = el.querySelector('.cam'); s.hl = el.querySelector('.hl'); s.lb = el.querySelector('.lb');
+      s.rip = el.querySelector('.rip'); s.cur = el.querySelector('.cur');
+    }
+    s.cues = (s.cues || []).map(c => ({ ...c, t: cueTime(s, c.at) })).sort((a, b) => a.t - b.t);
+    if (s.chapter) {
+      const c = document.createElement('div'); c.className = 'chap';
+      c.innerHTML = `<b>${esc(s.chapterNo || '')}</b><span>${esc(s.chapter)}</span>`;
+      el.appendChild(c); s.chap = c;
+    }
+  }
+  document.documentElement.style.setProperty('--accent', spec.accent);
+  return events();
+}
+
+// The moments that get a sound, in global seconds: render.mjs mixes them under the voice.
+function events() {
+  const ev = [];
+  S.steps.forEach((s, k) => {
+    if (k > 0) ev.push({ t: Math.max(0, s.off - FADE), type: 'whoosh' });
+    if (s.kind === 'title') ev.push({ t: s.off + 0.2, type: 'rise' });
+    for (const c of s.cues) {
+      if (c.click) ev.push({ t: s.off + c.t, type: 'click' });
+      else if (c.box) ev.push({ t: s.off + c.t, type: 'tick' });
+    }
+    for (const p of s.parts || []) if (p.anim === 'pop' || p.anim === 'rise') ev.push({ t: s.off + p.t, type: 'pop' });
+  });
+  return ev.filter(e => e.t < S.total).sort((a, b) => a.t - b.t);
+}
+
+// Value of a cued property at time t, eased from the previous value to the latest cue's.
+function track(s, key, t, initial, lerp, dur = MOVE) {
+  let prev = initial, cur = initial, t0 = -1;
+  for (const c of s.cues) if (key in c && c.t <= t) { prev = cur; cur = c[key]; t0 = c.t; }
+  if (t0 < 0) return { v: cur, p: 1, t0 };
+  const p = ease(clamp((t - t0) / dur));
+  return { v: lerp(prev, cur, p), p, prev, t0 };
+}
+
+function camFor(s, z) {
+  const [iw, ih] = s.size;
+  if (z === 'full' || !z) return { cx: iw/2, cy: ih/2, k: s.fit };
+  const [x, y, w, h] = z;
+  return { cx: x + w/2, cy: y + h/2, k: Math.min(2.4, Math.max(s.fit, 0.88 * Math.min(W / w, H / h))) };
+}
+
+function drawShot(s, t) {
+  const cam = track(s, 'zoom', t, 'full', (a, b, p) => {
+    const A = camFor(s, a), B = camFor(s, b);
+    return { cx: A.cx + (B.cx-A.cx)*p, cy: A.cy + (B.cy-A.cy)*p, k: A.k * Math.pow(B.k/A.k, p) };
+  }).v;
+  s.cam.style.transform = `translate(${W/2}px,${H/2}px) scale(${cam.k}) translate(${-cam.cx}px,${-cam.cy}px)`;
+
+  // Highlight: glides between targets, fades in for the first, pulses once on arrival.
+  const bx = track(s, 'box', t, null, (a, b, p) => !a ? b : !b ? null : a.map((v, i) => v + (b[i]-v)*p));
+  if (bx.v) {
+    const [x, y, w, h] = bx.v, pad = 6;
+    s.hl.setAttribute('x', x-pad); s.hl.setAttribute('y', y-pad);
+    s.hl.setAttribute('width', w+2*pad); s.hl.setAttribute('height', h+2*pad);
+    s.hl.style.opacity = bx.prev ? 1 : bx.p;
+    const since = t - bx.t0 - MOVE * 0.8;
+    s.hl.setAttribute('stroke-width', since > 0 && since < 0.5 ? 4 + 4 * Math.sin(Math.PI * since / 0.5) : 4);
+  } else s.hl.style.opacity = 0;
+  const lab = [...s.cues].reverse().find(c => 'box' in c && c.t <= t);
+  s.lb.textContent = lab && lab.label || '';
+  if (lab && lab.label) { s.lb.setAttribute('x', lab.box[0]); s.lb.setAttribute('y', lab.box[1] - 14); }
+
+  s.cur.style.display = s.cursor ? '' : 'none';
+  s.rip.style.opacity = 0;
+  if (!s.cursor) return;
+  const cur = track(s, 'cursor', t, s.cursor, (a, b, p) => [a[0] + (b[0]-a[0])*p, a[1] + (b[1]-a[1])*p], CURSOR).v;
+  const click = [...s.cues].reverse().find(c => c.click && c.t <= t);
+  const cp = click ? (t - click.t) / 0.7 : 2;
+  s.cur.setAttribute('transform', `translate(${cur[0]},${cur[1]}) scale(${cp < .25 ? 0.85 : 1})`);
+  if (cp < 1) {
+    s.rip.setAttribute('cx', cur[0]); s.rip.setAttribute('cy', cur[1]);
+    s.rip.setAttribute('r', 8 + 40*cp); s.rip.style.opacity = 1 - cp;
+  }
+}
+
+function drawScene(s, t) {
+  for (const { e, anim, t: t0 } of s.parts) {
+    const p = clamp((t - t0) / (anim === 'draw' ? 0.8 : 0.6));
+    if (anim === 'draw') { e.style.strokeDasharray = 1; e.style.strokeDashoffset = 1 - ease(p); continue; }
+    e.style.opacity = p;
+    e.style.transform = anim === 'pop' ? `scale(${0.85 + 0.15*back(p)})`
+                      : anim === 'rise' ? `translateY(${24*(1-ease(p))}px)` : '';
+  }
+}
+
+function drawTitle(s, t) {
+  const a = ease(clamp(t / 0.8)), b = ease(clamp((t - 0.5) / 0.8)), c = ease(clamp((t - 0.3) / 1.0));
+  s.h1.style.opacity = a; s.h1.style.transform = `translateY(${30*(1-a)}px)`;
+  s.sub.style.opacity = b; s.sub.style.transform = `translateY(${20*(1-b)}px)`;
+  s.bar.style.width = 220 * c + 'px';
+  s.dots.forEach((d, i) => {
+    const x = ((i * 397) % W + t * (12 + i % 7) * 4) % W, y = ((i * 211) % H + Math.sin(t * 0.6 + i) * 12 + H) % H;
+    d.setAttribute('cx', x); d.setAttribute('cy', y);
+  });
+}
+
+// Lower third: slides in after the step starts, out after a few seconds.
+function drawChapter(s, t) {
+  if (!s.chap) return;
+  const inP = ease(clamp((t - 0.3) / 0.6)), outP = ease(clamp((t - 4.0) / 0.6));
+  const x = -40 * (1 - inP) - 60 * outP;
+  s.chap.style.opacity = inP * (1 - outP); s.chap.style.transform = `translateX(${x}px)`;
+}
+
+// Karaoke caption: the sentence being spoken, words said in white, the current one in yellow.
+function drawCaption(s, t) {
+  const ws = s.words; let i = ws.findIndex(w => w.start > t); if (i < 0) i = ws.length;
+  const cur = Math.max(0, i - 1);
+  let a = cur; while (a > 0 && !/[.!?:]$/.test(ws[a-1].w)) a--;
+  let b = cur; while (b < ws.length - 1 && !/[.!?]$/.test(ws[b].w)) b++;
+  document.getElementById('cap').innerHTML = '<span>' + ws.slice(a, b + 1).map((w, k) => {
+    const j = a + k, x = esc(w.w);
+    return j === cur && t < w.end + 0.15 ? `<i>${x}</i>` : j < i ? `<b>${x}</b>` : x;
+  }).join(' ') + '</span>';
+}
+
+// Global time -> visible steps; each step cross-fades in over FADE before its narration starts.
+function seek(T) {
+  let shown = null;
+  S.steps.forEach((s, k) => {
+    const next = S.steps[k + 1], into = T - s.off;
+    const vis = into >= -FADE && T < (next ? next.off : Infinity);
+    s.el.style.display = vis ? '' : 'none';
+    if (!vis) return;
+    s.el.style.zIndex = k;
+    s.el.style.opacity = into < 0 && k > 0 ? ease(1 + into / FADE) : 1;
+    const t = Math.max(0, into);
+    ({ title: drawTitle, scene: drawScene, shot: drawShot })[s.kind](s, t);
+    drawChapter(s, t);
+    if (into >= 0) shown = [s, t];
+  });
+  if (shown && S.captions) drawCaption(...shown);
+  document.getElementById('prog').style.width = (W * clamp(T / S.total)) + 'px';
+}
+</script></body></html>
