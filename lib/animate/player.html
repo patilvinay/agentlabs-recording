@@ -28,15 +28,18 @@
   #cap b { font-weight: 500; color: #f8fafc; }
   #cap i { font-style: normal; color: #facc15; font-weight: 600; }
   #prog { position: absolute; left: 0; height: 4px; background: var(--accent); }
-  [data-anim] { transform-box: fill-box; transform-origin: center; }
+  [data-anim], [data-emph] { transform-box: fill-box; transform-origin: center; }
+  .layer > svg { transform-origin: 50% 50%; }
 </style></head>
 <body><div id="stage"></div><div id="cap"></div><div id="prog"></div>
 <script>
 const FADE = 0.5, MOVE = 0.9, CURSOR = 0.6;
 const ease = p => p < .5 ? 4*p*p*p : 1 - Math.pow(-2*p + 2, 3) / 2;
+const spring = p => p <= 0 ? 0 : 1 - Math.exp(-6 * p) * Math.cos(10 * p);  // overshoots, settles at 1
 const back = p => { const c = 1.7; return 1 + (c+1)*Math.pow(p-1,3) + c*Math.pow(p-1,2); };
 const clamp = (v, a=0, b=1) => Math.max(a, Math.min(b, v));
 const norm = s => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+const NS = 'http://www.w3.org/2000/svg';
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 let S = null, W = 0, H = 0;
 
@@ -68,7 +71,9 @@ async function init(spec) {
       g.innerHTML = Array.from({ length: 40 }, (_, i) =>
         `<circle r="${2 + (i * 7) % 5}" fill="rgba(147,197,253,${0.08 + ((i * 13) % 10) / 60})"/>`).join('');
       s.dots = [...g.children];
-      s.h1 = el.querySelector('h1'); s.sub = el.querySelector('p'); s.bar = el.querySelector('.bar');
+      s.h1 = el.querySelector('h1');
+      s.h1.innerHTML = (s.title || '').split(' ').map(w => `<span style="display:inline-block">${esc(w)}</span>`).join(' ');
+      s.words1 = [...s.h1.children]; s.sub = el.querySelector('p'); s.bar = el.querySelector('.bar');
     } else if (s.kind === 'scene') {
       el.innerHTML = s.svgText;
       const svg = el.querySelector('svg'); svg.setAttribute('width', W); svg.setAttribute('height', H);
@@ -81,8 +86,26 @@ async function init(spec) {
           if (!part.path) throw new Error(`step ${s.n}: data-path "${d.path}" not found`);
           part.len = part.path.getTotalLength(); part.dur = +d.dur || 1.5; part.loop = d.loop != null; part.stay = d.stay != null;
         }
+        if (part.anim === 'type') { part.full = e.textContent; part.dur = +d.dur || Math.max(0.4, part.full.length * 0.035); }
+        if (part.anim === 'count') { part.to = +d.to; part.dur = +d.dur || 1.4; part.fmt = d.format || '#'; }
         return part;
       });
+      s.svg = svg;
+      // data-emph="word,word": a pulse and glow each time one of those words is spoken
+      s.emph = [...el.querySelectorAll('[data-emph]')].map(e => ({ e,
+        ts: e.dataset.emph.split(',').map(w => cueTime(s, isNaN(+w) ? w.trim() : +w)),
+        own: !e.hasAttribute('data-at') }));
+      // data-burst[="colour"]: rays fly out as the element appears
+      const inv = svg.getScreenCTM().inverse();
+      for (const part of s.parts) {
+        if (part.e.dataset.burst == null) continue;
+        const r = part.e.getBoundingClientRect();
+        const c = new DOMPoint(r.x + r.width / 2, r.y + r.height / 2).matrixTransform(inv);
+        const rad = Math.max(r.width, r.height) * inv.a / 2 + 8, col = part.e.dataset.burst || S.highlight;
+        const g = document.createElementNS(NS, 'g');
+        g.innerHTML = Array.from({ length: 10 }, () => `<line stroke="${esc(col)}" stroke-width="4" stroke-linecap="round"/>`).join('');
+        svg.appendChild(g); part.burst = { c, rad, lines: [...g.children] };
+      }
     } else {
       const img = new Image(); img.src = s.imgUrl; await img.decode();
       const iw = img.naturalWidth, ih = img.naturalHeight;
@@ -122,9 +145,17 @@ function events() {
       if (c.click) ev.push({ t: s.off + c.t, type: 'click' });
       else if (c.box) ev.push({ t: s.off + c.t, type: 'tick' });
     }
-    for (const p of s.parts || []) if (p.anim === 'pop' || p.anim === 'rise') ev.push({ t: s.off + p.t, type: 'pop' });
+    for (const p of s.parts || []) {
+      const type = { pop: 'pop', rise: 'pop', bounce: 'pop', popup: 'pop', zoom: 'whoosh', count: 'tick',
+                     'slide-left': 'swish', 'slide-right': 'swish', 'slide-up': 'swish', 'slide-down': 'swish' }[p.anim];
+      if (type) ev.push({ t: s.off + p.t, type });
+      if (p.burst) ev.push({ t: s.off + p.t + 0.1, type: 'sparkle' });
+    }
+    for (const m of s.emph || []) for (const x of m.ts) ev.push({ t: s.off + x, type: 'tick' });
   });
-  return ev.filter(e => e.t < S.total).sort((a, b) => a.t - b.t);
+  ev.sort((a, b) => a.t - b.t);
+  const last = {};
+  return ev.filter(e => e.t < S.total && !(e.t - (last[e.type] ?? -9) < 0.15) && (last[e.type] = e.t, true));
 }
 
 // Value of a cued property at time t, eased from the previous value to the latest cue's.
@@ -189,17 +220,65 @@ function drawScene(s, t) {
       e.setAttribute('transform', `translate(${pt.x},${pt.y})`);
       continue;
     }
-    const p = clamp((t - t0) / (anim === 'draw' ? 0.8 : 0.6));
+    if (anim === 'type') {
+      const q = clamp((t - t0) / part.dur);
+      e.style.opacity = t < t0 ? 0 : 1; e.textContent = part.full.slice(0, Math.round(part.full.length * q));
+      continue;
+    }
+    if (anim === 'count') {
+      const q = 1 - Math.pow(1 - clamp((t - t0) / part.dur), 3);
+      e.style.opacity = t < t0 ? 0 : 1;
+      e.textContent = part.fmt.replace('#', Math.round(part.to * q).toLocaleString('en-US').replace(/,/g, '\u2009'));
+      continue;
+    }
+    const slow = { draw: 0.8, bounce: 0.9, popup: 0.9, zoom: 0.7, wipe: 0.7 }[anim] || 0.6;
+    const p = clamp((t - t0) / slow);
     if (anim === 'draw') { e.style.strokeDasharray = 1; e.style.strokeDashoffset = 1 - ease(p); continue; }
-    e.style.opacity = p;
-    e.style.transform = anim === 'pop' ? `scale(${0.85 + 0.15*back(p)})`
-                      : anim === 'rise' ? `translateY(${24*(1-ease(p))}px)` : '';
+    appear(e, anim, p);
+    if (part.burst) drawBurst(part.burst, (t - t0 - 0.12) / 0.55);
   }
+  for (const { e, ts, own } of s.emph) {
+    const t1 = ts.filter(x => x <= t).pop(), q = t1 == null ? 1 : (t - t1) / 0.7;
+    if (own) e.style.transform = '';
+    if (q < 1) {
+      const k = Math.sin(Math.PI * q);
+      e.style.transform += ` scale(${1 + 0.18 * k})`;
+      e.style.filter = `drop-shadow(0 0 ${14 * k}px ${S.highlight})`;
+    } else e.style.filter = '';
+  }
+  // the whole scene drifts slowly closer, so a still moment never looks frozen
+  if (S.drift) s.svg.style.transform = `scale(${1 + 0.035 * ease(clamp(t / s.dur))})`;
+}
+
+// How an element arrives, at progress p (0..1) of its entrance.
+function appear(e, anim, p) {
+  let o = p, tr = '', f = '';
+  const dir = { 'slide-left': [-1, 0], 'slide-right': [1, 0], 'slide-up': [0, -1], 'slide-down': [0, 1] }[anim];
+  if (anim === 'pop') tr = `scale(${0.85 + 0.15 * back(p)})`;
+  else if (anim === 'rise') tr = `translateY(${24 * (1 - ease(p))}px)`;
+  else if (anim === 'bounce') { o = clamp(p * 4); tr = `scale(${spring(p)})`; }
+  else if (anim === 'popup') { o = clamp(p * 4); tr = `translateY(${18 * (1 - ease(p))}px) rotate(${-8 * (1 - spring(p))}deg) scale(${spring(p)})`; }
+  else if (dir) { o = clamp(p * 2.5); const d = 140 * (1 - back(p)); tr = `translate(${-dir[0] * d}px, ${-dir[1] * d}px)`; }
+  else if (anim === 'zoom') { tr = `scale(${1.5 - 0.5 * ease(p)})`; f = `blur(${8 * (1 - ease(p))}px)`; }
+  else if (anim === 'wipe') { o = p > 0 ? 1 : 0; e.style.clipPath = `inset(-20% ${100 * (1 - ease(p))}% -20% -5%)`; }
+  e.style.opacity = o; e.style.transform = tr; e.style.filter = f;
+}
+
+function drawBurst({ c, rad, lines }, q) {
+  lines.forEach((l, i) => {
+    const a = i * Math.PI / 5, r1 = rad + 34 * ease(clamp(q)), r2 = r1 + 20 * (1 - clamp(q));
+    l.setAttribute('x1', c.x + Math.cos(a) * r1); l.setAttribute('y1', c.y + Math.sin(a) * r1);
+    l.setAttribute('x2', c.x + Math.cos(a) * r2); l.setAttribute('y2', c.y + Math.sin(a) * r2);
+    l.style.opacity = q > 0 && q < 1 ? 1 - q : 0;
+  });
 }
 
 function drawTitle(s, t) {
   const a = ease(clamp(t / 0.8)), b = ease(clamp((t - 0.5) / 0.8)), c = ease(clamp((t - 0.3) / 1.0));
-  s.h1.style.opacity = a; s.h1.style.transform = `translateY(${30*(1-a)}px)`;
+  s.words1.forEach((w, i) => {
+    const q = ease(clamp((t - 0.1 - i * 0.09) / 0.6));
+    w.style.opacity = q; w.style.transform = `translateY(${40*(1-q)}px)`; w.style.filter = `blur(${6*(1-q)}px)`;
+  });
   s.sub.style.opacity = b; s.sub.style.transform = `translateY(${20*(1-b)}px)`;
   s.bar.style.width = 220 * c + 'px';
   s.dots.forEach((d, i) => {
@@ -228,6 +307,20 @@ function drawCaption(s, t) {
   }).join(' ') + '</span>';
 }
 
+// Entering (p < 1) with this step's transition; pushed aside while a sliding next step enters.
+function transition(s, p, next, T) {
+  const kind = s.transition || S.transition, el = s.el.style;
+  el.opacity = 1; el.transform = ''; el.clipPath = '';
+  if (p < 1) {
+    if (kind === 'slide') el.transform = `translateX(${(1 - p) * W}px)`;
+    else if (kind === 'zoom') { el.opacity = p; el.transform = `scale(${1.12 - 0.12 * p})`; }
+    else if (kind === 'wipe') el.clipPath = `inset(0 ${(1 - p) * 100}% 0 0)`;
+    else el.opacity = p;
+  } else if (next && (next.transition || S.transition) === 'slide') {
+    el.transform = `translateX(${-0.35 * W * ease(1 + (T - next.off) / FADE)}px)`;
+  }
+}
+
 // Global time -> visible steps; each step cross-fades in over FADE before its narration starts.
 function seek(T) {
   let shown = null;
@@ -237,7 +330,7 @@ function seek(T) {
     s.el.style.display = vis ? '' : 'none';
     if (!vis) return;
     s.el.style.zIndex = k;
-    s.el.style.opacity = into < 0 && k > 0 ? ease(1 + into / FADE) : 1;
+    transition(s, into < 0 && k > 0 ? ease(1 + into / FADE) : 1, next && T >= next.off - FADE ? next : null, T);
     const t = Math.max(0, into);
     ({ title: drawTitle, scene: drawScene, shot: drawShot })[s.kind](s, t);
     drawChapter(s, t);

@@ -10,9 +10,11 @@
 # job. Prints the clip length in whole seconds, plus one, on stdout.
 #
 # Environment:
-#   REC_TTS     edge (default) | espeak | silent   engine; edge falls back to
-#               espeak-ng when offline, silent writes quiet audio (for tests)
-#   REC_VOICE   Edge voice, default en-US-AvaMultilingualNeural
+#   REC_TTS     edge (default) | deepgram | espeak | silent   engine; edge falls
+#               back to espeak-ng when offline, silent writes quiet audio (tests);
+#               deepgram is Aura-2 (needs DEEPGRAM_API_KEY), word times from Nova-3
+#   REC_VOICE   voice: Edge default en-US-AvaMultilingualNeural, Deepgram
+#               default aura-2-thalia-en
 #   REC_RATE    Edge rate, e.g. +10%  (default +0%)
 #   REC_FORCE   1 renders the audio again even when the text is unchanged
 #               (by default unchanged text keeps its audio and word timings)
@@ -46,8 +48,9 @@ edge_bin() {
   return 1
 }
 
-voice="${REC_VOICE:-en-US-AvaMultilingualNeural}" rate="${REC_RATE:-+0%}"
 engine="${REC_TTS:-edge}"
+case "$engine" in deepgram) dv=aura-2-thalia-en ;; *) dv=en-US-AvaMultilingualNeural ;; esac
+voice="${REC_VOICE:-$dv}" rate="${REC_RATE:-+0%}"
 key="$engine $voice $rate"
 
 # Same text, same voice: keep the audio already rendered. A TTS service does
@@ -65,7 +68,7 @@ fi
 if [ "$fresh" = 1 ] && [ "$engine" = edge ]; then
   # The Python beside edge-tts also yields word timings; the plain CLI only audio.
   if e=$(edge_bin) && py="$(dirname "$e")/python" && [ -x "$py" ] && "$py" -c 'import edge_tts' 2>/dev/null \
-     && "$py" "$(dirname "$(readlink -f "$0")")/rec-tts" --voice "$voice" --rate="$rate" --text "$text" \
+     && "$py" "$(dirname "$(readlink -f "$0")")/rec-tts" --engine edge --voice "$voice" --rate="$rate" --text "$text" \
           --mp3 "$audio/$n.mp3" --words "$audio/$n.words.json" >/dev/null 2>&1; then
     :
   elif e=$(edge_bin) && "$e" --voice "$voice" --rate="$rate" --text "$text" --write-media "$audio/$n.mp3" >/dev/null 2>&1; then
@@ -75,8 +78,14 @@ if [ "$fresh" = 1 ] && [ "$engine" = edge ]; then
     engine=espeak
   fi
 fi
+if [ "$fresh" = 1 ] && [ "$engine" = deepgram ]; then
+  # No fallback: a demo that switches voice halfway is worse than a clear stop.
+  python3 "$(dirname "$(readlink -f "$0")")/rec-tts" --engine deepgram --voice "$voice" --rate="$rate" \
+    --text "$text" --mp3 "$audio/$n.mp3" --words "$audio/$n.words.json" \
+    || { echo "rec-step: Deepgram failed (is DEEPGRAM_API_KEY set and valid?)" >&2; exit 1; }
+fi
 [ "$fresh" = 1 ] && case "$engine" in
-  edge) ;;
+  edge|deepgram) ;;
   espeak)
     command -v espeak-ng >/dev/null || { echo "rec-step: no TTS engine (install edge-tts or espeak-ng)" >&2; exit 1; }
     espeak-ng -w "$audio/$n.wav" "$text"

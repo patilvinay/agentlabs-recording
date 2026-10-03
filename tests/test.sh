@@ -39,6 +39,16 @@ grep -q 'Step 03. Something worth saying' "$d/demo.srt" || fail "subtitle text"
 rm "$d/shots/02.jpg"
 rec-build -C "$d" 2>/dev/null && fail "built with a missing screenshot"
 rec-build -C "$d" -o '../x.mp4' 2>/dev/null && fail "accepted an output path outside the folder"
+# Word times from a transcript, matched back to the script (the Deepgram path, offline).
+python3 - "$REPO/bin/rec-tts" <<'PY' || fail "transcript alignment"
+import sys, types
+src = open(sys.argv[1]).read().split("\np = argparse.ArgumentParser()")[0]
+m = types.ModuleType("rt"); exec(src, m.__dict__)
+heard = [{"w": w, "start": i * 0.5, "end": i * 0.5 + 0.4} for i, w in enumerate("about 1000 atoms thick".split())]
+out = m.align("about one thousand atoms thick.", heard)
+assert [w["w"] for w in out] == ["about", "one", "thousand", "atoms", "thick."], out
+assert out[0]["start"] == 0 and out[3]["start"] == 1.0 and out[1]["start"] < out[2]["start"] < 1.0, out
+PY
 echo "ok: rec-build end to end"
 
 # rec-animate: title, scene and cued screenshot, sound and music; needs node + Chrome.
@@ -61,12 +71,16 @@ cat > "$a/scenes/02.svg" <<'SVG'
   <path data-at="line" data-anim="draw" pathLength="1" d="M500 360 L1100 360" stroke="#111" stroke-width="4" fill="none"/>
   <path id="track" d="M500 360 L1100 360" fill="none"/>
   <circle data-at="line" data-anim="travel" data-path="#track" data-dur="1" data-delay="0.2" r="8" fill="red"/>
+  <rect data-at="First" data-anim="popup" data-burst="" data-emph="line" x="1200" y="300" width="100" height="100" fill="#0a0"/>
+  <text data-at="boxes," data-anim="count" data-to="12000" data-format="1 in #" x="200" y="600" font-size="40">0</text>
+  <text data-at="then" data-anim="type" x="200" y="700" font-size="40">typed text</text>
+  <rect data-at="the" data-anim="slide-left" x="900" y="600" width="80" height="40"/>
 </svg>
 SVG
 cat > "$a/steps.json" <<'JSON'
 { "music": "pad", "steps": [
   { "n": "01", "title": "Animated test", "subtitle": "rec-animate" },
-  { "n": "02", "svg": "scenes/02.svg", "chapter": "Scene" },
+  { "n": "02", "svg": "scenes/02.svg", "chapter": "Scene", "transition": "slide" },
   { "n": "03", "chapter": "Screenshot", "cursor": [100, 100], "cues": [
     { "at": "Zoom", "zoom": [400, 200, 400, 200], "box": [400, 200, 400, 200] },
     { "at": "click", "cursor": [600, 300] }, { "at": "button.", "click": true } ] } ] }

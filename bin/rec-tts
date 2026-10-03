@@ -1,17 +1,69 @@
 #!/usr/bin/env python3
-"""Speak text with Edge TTS, writing the audio and the time each word is spoken.
+"""Speak text, writing the audio and the time each word is spoken.
 
-    rec-tts --voice V --rate R --text T --mp3 OUT.mp3 --words OUT.words.json
+    rec-tts --engine edge|deepgram --voice V --rate R --text T --mp3 OUT.mp3 --words OUT.words.json
 
-Run by rec-step with the Python that has the edge_tts module (the one next
-to the edge-tts command). The word file is a list of {w, start, end} in
-seconds, punctuation kept from the text, which rec-animate cues against.
+edge      Microsoft Edge neural voices; word times from its word boundaries.
+          Needs the edge_tts module: rec-step runs this with the Python
+          beside the edge-tts command.
+deepgram  Deepgram Aura-2 (--voice aura-2-thalia-en, ...); Aura gives no word
+          times, so the audio is transcribed again with Nova-3 for them.
+          Needs DEEPGRAM_API_KEY. Standard library only.
+
+The word file is a list of {w, start, end} in seconds, one entry per word of
+the TEXT (punctuation kept), which rec-animate cues against.
 """
-import argparse, asyncio, json
-import edge_tts
+import argparse, asyncio, difflib, json, os, re, sys, urllib.request
+
+norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
 
 
-async def main(a):
+def attach_punctuation(words, text):
+    """Boundaries come without punctuation; take it back from the text."""
+    pos = 0
+    for w in words:
+        i = text.find(w["w"], pos)
+        if i < 0:
+            continue
+        pos = i + len(w["w"])
+        while pos < len(text) and text[pos] in ".,!?:;":
+            w["w"] += text[pos]
+            pos += 1
+    return words
+
+
+def align(text, heard):
+    """Give each word of the text the time of the heard word it matches.
+
+    heard: [{w, start, end}] from a transcript. Words the transcript spelled
+    differently ("1000" for "thousand") get times spread between neighbours.
+    """
+    script = text.split()
+    a, b = [norm(w) for w in script], [norm(h["w"]) for h in heard]
+    times = [None] * len(script)
+    for i, j, n in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            times[i + k] = (heard[j + k]["start"], heard[j + k]["end"])
+    end = heard[-1]["end"] if heard else 1.0
+    k = 0
+    while k < len(script):
+        if times[k] is not None:
+            k += 1
+            continue
+        g = k
+        while g < len(script) and times[g] is None:
+            g += 1
+        lo = times[k - 1][1] if k > 0 else 0.0
+        hi = times[g][0] if g < len(script) else end
+        step = max(hi - lo, 0.05) / (g - k)
+        for m in range(k, g):
+            times[m] = (lo + step * (m - k), lo + step * (m - k + 1) - 0.02)
+        k = g
+    return [{"w": w, "start": round(s, 3), "end": round(e, 3)} for w, (s, e) in zip(script, times)]
+
+
+async def edge(a):
+    import edge_tts
     words, audio = [], bytearray()
     comm = edge_tts.Communicate(a.text, a.voice, rate=a.rate, boundary="WordBoundary")
     async for chunk in comm.stream():
@@ -21,21 +73,31 @@ async def main(a):
             start = chunk["offset"] / 1e7  # 100 ns ticks
             words.append({"w": chunk["text"], "start": round(start, 3),
                           "end": round(start + chunk["duration"] / 1e7, 3)})
-    # Boundaries come without punctuation; take it back from the text.
-    pos = 0
-    for w in words:
-        i = a.text.find(w["w"], pos)
-        if i < 0:
-            continue
-        pos = i + len(w["w"])
-        while pos < len(a.text) and a.text[pos] in ".,!?:;":
-            w["w"] += a.text[pos]
-            pos += 1
-    open(a.mp3, "wb").write(audio)
-    json.dump(words, open(a.words, "w"), indent=1)
+    return bytes(audio), attach_punctuation(words, a.text)
+
+
+def deepgram(a):
+    key = os.environ.get("DEEPGRAM_API_KEY")
+    if not key:
+        sys.exit("rec-tts: DEEPGRAM_API_KEY is not set")
+    def call(url, body, ctype):
+        req = urllib.request.Request(url, data=body, headers={"Authorization": f"Token {key}", "Content-Type": ctype})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read()
+    audio = call(f"https://api.deepgram.com/v1/speak?model={a.voice}&encoding=mp3",
+                 json.dumps({"text": a.text}).encode(), "application/json")
+    res = json.loads(call("https://api.deepgram.com/v1/listen?model=nova-3&language=en&punctuate=false",
+                          audio, "audio/mpeg"))
+    heard = [{"w": w["word"], "start": w["start"], "end": w["end"]}
+             for w in res["results"]["channels"][0]["alternatives"][0]["words"]]
+    return audio, align(a.text, heard)
 
 
 p = argparse.ArgumentParser()
+p.add_argument("--engine", default="edge", choices=["edge", "deepgram"])
 for k in ("voice", "rate", "text", "mp3", "words"):
     p.add_argument("--" + k, required=True)
-asyncio.run(main(p.parse_args()))
+args = p.parse_args()
+audio, words = asyncio.run(edge(args)) if args.engine == "edge" else deepgram(args)
+open(args.mp3, "wb").write(audio)
+json.dump(words, open(args.words, "w"), indent=1)

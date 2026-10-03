@@ -121,16 +121,28 @@ returns the same audio twice, and every cue hangs on its word times);
   `cursor` to show one); `click` ripples. Read the coordinates off the
   screenshot itself.
 - **Scenes**: an SVG with `viewBox="0 0 1600 800"`; any element with
-  `data-at="<word>"` appears when that word is said, `data-anim` `pop`,
-  `rise`, `fade` or `draw` (a path with `pathLength="1"` draws itself);
+  `data-at="<word>"` appears when that word is said, by its `data-anim`:
+  `fade`, `pop`, `rise`, `bounce` (springs in), `popup` (springs in with a
+  tilt, for callouts), `slide-left|right|up|down`, `zoom` (in from blur),
+  `wipe` (revealed left to right), `type` (typewriter text), `count` (a
+  number counts up to `data-to`; `data-format="1 in #"`), or `draw` (a path
+  with `pathLength="1"` draws itself). `data-burst[="#colour"]` throws rays
+  as it appears; `data-emph="word,word"` pulses and glows it each time one
+  of those words is spoken;
   `data-delay` adds seconds after the word, to stagger a group. `travel`
   moves an element (drawn at 0,0) along `data-path="#id"` over `data-dur`
   seconds, then fades unless `data-stay`; `data-loop` keeps it going round,
   for orbits and flows. `data-at="0"` is there from the start. For many
   similar elements (particles, grids) write a small generator script beside
   the scenes and keep it as part of the source.
+- **Motion**: each step enters by its `transition` (or the top-level one):
+  `fade` (default), `slide` (pushes the last step aside), `zoom` or `wipe`.
+  Scenes drift slowly closer (`"drift": false` stops it); title words rise
+  in one by one. Use the springy entrances for things worth noticing and
+  keep `fade`/`rise` for the rest, or the motion turns into noise.
 - **Sound**: whoosh on transitions, rise on title cards, click, tick on
-  highlight moves, pop on scene elements (`"sfx": false` turns them off).
+  highlight moves, emphasis and count-ups, pop on entrances, swish on
+  slides, sparkle on bursts (`"sfx": false` turns them off).
   `"music": "pad"` synthesises a soft bed, or name an audio file; it is
   ducked under the voice. Also: `captions`, `progress`, `accent`,
   `highlight`, `musicVolume`, `sfxVolume`, `hold` (seconds after a step).
@@ -167,6 +179,7 @@ returns the same audio twice, and every cue hangs on its word times);
 | `REC_VOICE` | `en-US-AvaMultilingualNeural` | any `edge-tts --list-voices` name |
 | `REC_RATE` | `+0%` | Edge speaking rate |
 | `REC_LIVE` | `1` | `0` records without speaking aloud |
+| `REC_TTS=deepgram` | | Deepgram Aura-2 voices (`REC_VOICE=aura-2-asteria-en`, …; American, British, Australian accents), needs `DEEPGRAM_API_KEY`; word times come from transcribing the audio with Nova-3 and matching it to the text. More natural than Edge, and stops rather than switching voice when it fails |
 | `REC_FORCE` | `0` | `1` renders narration again even when the text is unchanged |
 | `REC_CHROME` | found | Chrome for `rec-animate` |
 | `REC_FFMPEG_IMAGE` | `jrottenberg/ffmpeg:6.1-alpine` | used when ffmpeg is not installed |
