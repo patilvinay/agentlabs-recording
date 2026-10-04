@@ -147,9 +147,18 @@ def gemini(a):
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": a.voice}}}}}
-    res = json.loads(http(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                          json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": key}))
-    part = res["candidates"][0]["content"]["parts"][0]["inlineData"]
+    if a.wav:  # audio made elsewhere (a batch job): only transcribe, align and encode it
+        part = {"mimeType": "audio/wav", "data": base64.b64encode(open(a.wav, "rb").read()).decode()}
+    else:
+        for attempt in range(4):  # the model now and then answers with no audio: ask again
+            res = json.loads(http(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                                  json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": key}))
+            parts = res.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            part = next((p["inlineData"] for p in parts if "inlineData" in p), None)
+            if part:
+                break
+        else:
+            sys.exit("rec-tts: gemini returned no audio four times")
     raw = base64.b64decode(part["data"])
     if not part["mimeType"].startswith("audio/wav"):  # raw 16-bit PCM
         rate = int(part["mimeType"].split("rate=")[1].split(";")[0]) if "rate=" in part["mimeType"] else 24000
@@ -170,6 +179,7 @@ for k in ("voice", "rate", "text", "mp3", "words"):
 p.add_argument("--style", default="", help="gemini: how to speak, e.g. 'Say warmly, like a teacher:'")
 p.add_argument("--model", default="", help="gemini: TTS model (default gemini-2.5-pro-preview-tts)")
 p.add_argument("--lang", default="en", help="language of the text, for the transcript that gives word times")
+p.add_argument("--wav", default="", help="gemini: use this audio (e.g. from a batch job) instead of generating it")
 args = p.parse_args()
 audio, words = asyncio.run(edge(args)) if args.engine == "edge" else deepgram(args) if args.engine == "deepgram" else gemini(args)
 open(args.mp3, "wb").write(audio)
