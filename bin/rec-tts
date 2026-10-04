@@ -26,7 +26,7 @@ def attach_punctuation(words, text):
         if i < 0:
             continue
         pos = i + len(w["w"])
-        while pos < len(text) and text[pos] in ".,!?:;":
+        while pos < len(text) and text[pos] in ".,!?:;।":
             w["w"] += text[pos]
             pos += 1
     return words
