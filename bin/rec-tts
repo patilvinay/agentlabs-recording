@@ -164,6 +164,21 @@ def to_mp3(wav):
         return open(dst, "rb").read()
 
 
+def spoke_direction(style, text, heard):
+    """True when the direction was read aloud anywhere in the clip, not only at the start: the clip
+    has many more words than the text, or several of the direction's own words that the text
+    doesn't contain (teenagers, storyteller, expressively…)."""
+    said = [norm(h["w"]) for h in heard]
+    if " ".join(said[:2]).startswith("say"):
+        return True
+    if not style:
+        return False
+    own = {norm(w) for w in text.split()}
+    tell = {norm(w) for w in style.split() if len(norm(w)) > 5} - own
+    hits = sum(1 for w in set(said) if w in tell)
+    return hits >= 2 or len(said) > 1.3 * len(text.split()) + 6
+
+
 def gemini(a):
     """Gemini TTS (Google AI Studio key). --style is a direction placed before the text
     ("Say warmly, like …:"). gemini-2.5-pro-preview-tts follows it placed before the text; the
@@ -204,7 +219,7 @@ def gemini(a):
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(raw)
         raw = buf.getvalue()
     heard = transcribe(raw, "audio/wav", a.lang)
-    if heard and " ".join(h["w"] for h in heard[:2]).lower().startswith("say"):
+    if heard and spoke_direction(a.style, a.text, heard):
         sys.exit("rec-tts: the model spoke the style direction aloud; use another model or drop --style")
     return to_mp3(raw), align(a.text, heard)
 
