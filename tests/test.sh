@@ -48,6 +48,13 @@ heard = [{"w": w, "start": i * 0.5, "end": i * 0.5 + 0.4} for i, w in enumerate(
 out = m.align("about one thousand atoms thick.", heard)
 assert [w["w"] for w in out] == ["about", "one", "thousand", "atoms", "thick."], out
 assert out[0]["start"] == 0 and out[3]["start"] == 1.0 and out[1]["start"] < out[2]["start"] < 1.0, out
+# Devanagari: words match across spelling variants (जहाँ/जहां, ज़/ज) and a repeated short word
+# far away is not taken for an early one; times only move forward.
+heard = [{"w": w, "start": t, "end": t + 0.3} for w, t in
+         [("अब", 0.3), ("park", 0.6), ("पर", 1.0), ("लौटते", 1.3), ("हैं", 1.6), ("जहां", 1.9), ("ए", 2.3), ("बी", 2.6), ("और", 2.9), ("सी", 3.2)]]
+out = m.align("अब पार्क पर लौटते हैं, जहाँ ए, बी और सी", heard)
+assert [round(x["start"], 1) for x in out] == [0.3, 0.6, 1.0, 1.3, 1.6, 1.9, 2.3, 2.6, 2.9, 3.2], out
+assert all(b["start"] >= a["start"] for a, b in zip(out, out[1:])), out
 PY
 echo "ok: rec-build end to end"
 

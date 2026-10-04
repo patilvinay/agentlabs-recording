@@ -16,9 +16,14 @@ gemini    Gemini TTS (--voice Sulafat, Achird, Kore, …; --style "Say warmly, l
 The word file is a list of {w, start, end} in seconds, one entry per word of
 the TEXT (punctuation kept), which rec-animate cues against.
 """
-import argparse, asyncio, difflib, json, os, re, sys, urllib.request
+import argparse, asyncio, difflib, json, os, re, sys, unicodedata, urllib.request
 
-norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+def norm(s):
+    """A word reduced for matching, in any script: letters, marks and digits only, lower case,
+    with Devanagari spelling variants folded (ँ→ं, no nukta) so "जहाँ" matches "जहां"."""
+    s = unicodedata.normalize("NFC", s.lower()).replace("\u0901", "\u0902").replace("\u093c", "")
+    s = unicodedata.normalize("NFD", s).replace("\u093c", "")
+    return "".join(c for c in s if unicodedata.category(c)[0] in "LMN")
 
 
 def attach_punctuation(words, text):
@@ -36,33 +41,56 @@ def attach_punctuation(words, text):
 
 
 def align(text, heard):
-    """Give each word of the text the time of the heard word it matches.
+    """Give each word of the text a time from the transcript.
 
-    heard: [{w, start, end}] from a transcript. Words the transcript spelled
-    differently ("1000" for "thousand") get times spread between neighbours.
+    heard: [{w, start, end}]. Words matched in order become anchors, but only
+    when they fall roughly where their place in the text says they should (a
+    short common word must not pair with a far-away repeat). Words between
+    anchors share the time by their length, so a word the transcript spelled
+    differently ("1000" for "thousand") still lands about right.
     """
     script = text.split()
+    if not script:
+        return []
+    if not heard:
+        return [{"w": w, "start": 0.0, "end": 0.0} for w in script]
     a, b = [norm(w) for w in script], [norm(h["w"]) for h in heard]
-    times = [None] * len(script)
+    t0, t1 = heard[0]["start"], heard[-1]["end"]
+    size = [len(x) + 1 for x in a]
+    cum = [0]
+    for n in size:
+        cum.append(cum[-1] + n)
+    est = lambda i: t0 + (t1 - t0) * cum[i] / cum[-1]
+    anchors, last = [], -1.0
     for i, j, n in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
         for k in range(n):
-            times[i + k] = (heard[j + k]["start"], heard[j + k]["end"])
-    end = heard[-1]["end"] if heard else 1.0
-    k = 0
-    while k < len(script):
-        if times[k] is not None:
-            k += 1
+            if not a[i + k]:
+                continue
+            h = heard[j + k]
+            if abs(h["start"] - est(i + k)) <= 0.25 * (t1 - t0) + 1.0 and h["start"] >= last:
+                anchors.append((i + k, h["start"], h["end"]))
+                last = h["start"]
+    times = [None] * len(script)
+    for i, st, en in anchors:
+        times[i] = (st, en)
+    # Fill the gaps between anchors (and before the first / after the last) by word length.
+    bounds = [(-1, t0, t0)] + anchors + [(len(script), t1, t1)]
+    for (i0, _, e0), (i1, s1, _) in zip(bounds, bounds[1:]):
+        if i1 - i0 <= 1:
             continue
-        g = k
-        while g < len(script) and times[g] is None:
-            g += 1
-        lo = times[k - 1][1] if k > 0 else 0.0
-        hi = times[g][0] if g < len(script) else end
-        step = max(hi - lo, 0.05) / (g - k)
-        for m in range(k, g):
-            times[m] = (lo + step * (m - k), lo + step * (m - k + 1) - 0.02)
-        k = g
-    return [{"w": w, "start": round(s, 3), "end": round(e, 3)} for w, (s, e) in zip(script, times)]
+        lo = min(e0, s1)  # anchors can touch or overlap: never spill past the next one
+        span = max(s1 - lo, 0.0)
+        total = sum(size[i0 + 1:i1])
+        t = lo
+        for i in range(i0 + 1, i1):
+            d = span * size[i] / total
+            times[i] = (t, t + d * 0.9)
+            t += d
+    out, prev = [], 0.0
+    for w, (s0, e) in zip(script, times):  # times only ever move forward
+        s0 = max(s0, prev); e = max(e, s0); prev = s0
+        out.append({"w": w, "start": round(s0, 3), "end": round(e, 3)})
+    return out
 
 
 async def edge(a):
@@ -102,7 +130,7 @@ def transcribe(audio, ctype, lang):
     key = os.environ.get("DEEPGRAM_API_KEY")
     if not key:
         sys.exit("rec-tts: DEEPGRAM_API_KEY is not set (needed for word times)")
-    language = "en" if lang.startswith("en") else "multi"
+    language = "en" if lang.startswith("en") else "hi" if lang.startswith("hi") else "multi"
     res = json.loads(http(f"https://api.deepgram.com/v1/listen?model=nova-3&language={language}&punctuate=false",
                           audio, {"Authorization": f"Token {key}", "Content-Type": ctype}))
     return [{"w": w["word"], "start": w["start"], "end": w["end"]}
@@ -180,7 +208,12 @@ p.add_argument("--style", default="", help="gemini: how to speak, e.g. 'Say warm
 p.add_argument("--model", default="", help="gemini: TTS model (default gemini-2.5-pro-preview-tts)")
 p.add_argument("--lang", default="en", help="language of the text, for the transcript that gives word times")
 p.add_argument("--wav", default="", help="gemini: use this audio (e.g. from a batch job) instead of generating it")
+p.add_argument("--realign", action="store_true", help="only rebuild --words from the existing --mp3 (transcribe and align)")
 args = p.parse_args()
+if args.realign:
+    words = align(args.text, transcribe(open(args.mp3, "rb").read(), "audio/mpeg", args.lang))
+    json.dump(words, open(args.words, "w"), indent=1)
+    sys.exit(0)
 audio, words = asyncio.run(edge(args)) if args.engine == "edge" else deepgram(args) if args.engine == "deepgram" else gemini(args)
 open(args.mp3, "wb").write(audio)
 json.dump(words, open(args.words, "w"), indent=1)
