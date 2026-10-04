@@ -164,14 +164,21 @@ def to_mp3(wav):
 
 def gemini(a):
     """Gemini TTS (Google AI Studio key). --style is a direction placed before the text
-    ("Say warmly, like …:"), which gemini-2.5-pro-preview-tts follows without reading aloud;
-    the newest TTS model reads any direction out, so it is not the default."""
+    ("Say warmly, like …:"). gemini-2.5-pro-preview-tts follows it placed before the text; the
+    Flash models (e.g. gemini-3.8-flash-tts, about half the price) need it as director's notes."""
     import base64, io, wave
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         sys.exit("rec-tts: GEMINI_API_KEY is not set")
     model = a.model or "gemini-2.5-pro-preview-tts"
-    prompt = f"{a.style} {a.text}" if a.style else a.text
+    # 2.5 Pro follows a direction placed before the text; the newer (Flash) models read it aloud
+    # unless it is marked as director's notes with the transcript set apart.
+    if not a.style:
+        prompt = a.text
+    elif "2.5-pro" in model:
+        prompt = f"{a.style} {a.text}"
+    else:
+        prompt = f"# DIRECTOR'S NOTES (do not read aloud)\n{a.style}\n\n# TRANSCRIPT (read only this)\n{a.text}"
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseModalities": ["AUDIO"],
                                  "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": a.voice}}}}}
