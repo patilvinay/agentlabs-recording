@@ -130,7 +130,9 @@ def transcribe(audio, ctype, lang):
     key = os.environ.get("DEEPGRAM_API_KEY")
     if not key:
         sys.exit("rec-tts: DEEPGRAM_API_KEY is not set (needed for word times)")
-    language = "en" if lang.startswith("en") else "hi" if lang.startswith("hi") else "multi"
+    # nova-3 transcribes these Indian languages word by word; anything else goes to "multi"
+    base = lang.split("-")[0]
+    language = base if base in ("en", "hi", "kn", "ta", "te", "mr", "bn", "gu", "ml", "pa") else "multi"
     res = json.loads(http(f"https://api.deepgram.com/v1/listen?model=nova-3&language={language}&punctuate=false",
                           audio, {"Authorization": f"Token {key}", "Content-Type": ctype}))
     return [{"w": w["word"], "start": w["start"], "end": w["end"]}
