@@ -91,6 +91,10 @@ def http(url, body, headers, tries=8):
             if e.code not in (429, 500, 502, 503, 504) or n == tries - 1:
                 sys.exit(f"rec-tts: {url.split('?')[0]}: HTTP {e.code} {e.read()[:200]!r}")
             time.sleep(min(60, 8 * (n + 1)))
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:  # timeouts, dropped connections
+            if n == tries - 1:
+                sys.exit(f"rec-tts: {url.split('?')[0]}: {e}")
+            time.sleep(min(60, 8 * (n + 1)))
 
 
 def transcribe(audio, ctype, lang):
