@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Speak text, writing the audio and the time each word is spoken.
 
-    rec-tts --engine edge|deepgram --voice V --rate R --text T --mp3 OUT.mp3 --words OUT.words.json
+    rec-tts --engine edge|deepgram|gemini --voice V --rate R --text T --mp3 OUT.mp3 --words OUT.words.json
 
 edge      Microsoft Edge neural voices; word times from its word boundaries.
           Needs the edge_tts module: rec-step runs this with the Python
@@ -9,6 +9,9 @@ edge      Microsoft Edge neural voices; word times from its word boundaries.
 deepgram  Deepgram Aura-2 (--voice aura-2-thalia-en, ...); Aura gives no word
           times, so the audio is transcribed again with Nova-3 for them.
           Needs DEEPGRAM_API_KEY. Standard library only.
+gemini    Gemini TTS (--voice Sulafat, Achird, Kore, …; --style "Say warmly, like …:";
+          --lang hi for Hindi). Needs GEMINI_API_KEY, and DEEPGRAM_API_KEY for the
+          word times; ffmpeg or Docker to make the MP3. Waits out per-minute quotas.
 
 The word file is a list of {w, start, end} in seconds, one entry per word of
 the TEXT (punctuation kept), which rec-animate cues against.
@@ -76,28 +79,94 @@ async def edge(a):
     return bytes(audio), attach_punctuation(words, a.text)
 
 
+def http(url, body, headers, tries=8):
+    """POST with retries: per-minute quotas (429) and brief outages (5xx) wait and try again."""
+    import time, urllib.error
+    for n in range(tries):
+        try:
+            req = urllib.request.Request(url, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or n == tries - 1:
+                sys.exit(f"rec-tts: {url.split('?')[0]}: HTTP {e.code} {e.read()[:200]!r}")
+            time.sleep(min(60, 8 * (n + 1)))
+
+
+def transcribe(audio, ctype, lang):
+    """Word times by transcribing the audio with Deepgram Nova-3."""
+    key = os.environ.get("DEEPGRAM_API_KEY")
+    if not key:
+        sys.exit("rec-tts: DEEPGRAM_API_KEY is not set (needed for word times)")
+    language = "en" if lang.startswith("en") else "multi"
+    res = json.loads(http(f"https://api.deepgram.com/v1/listen?model=nova-3&language={language}&punctuate=false",
+                          audio, {"Authorization": f"Token {key}", "Content-Type": ctype}))
+    return [{"w": w["word"], "start": w["start"], "end": w["end"]}
+            for w in res["results"]["channels"][0]["alternatives"][0]["words"]]
+
+
 def deepgram(a):
     key = os.environ.get("DEEPGRAM_API_KEY")
     if not key:
         sys.exit("rec-tts: DEEPGRAM_API_KEY is not set")
-    def call(url, body, ctype):
-        req = urllib.request.Request(url, data=body, headers={"Authorization": f"Token {key}", "Content-Type": ctype})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            return r.read()
-    audio = call(f"https://api.deepgram.com/v1/speak?model={a.voice}&encoding=mp3",
-                 json.dumps({"text": a.text}).encode(), "application/json")
-    res = json.loads(call("https://api.deepgram.com/v1/listen?model=nova-3&language=en&punctuate=false",
-                          audio, "audio/mpeg"))
-    heard = [{"w": w["word"], "start": w["start"], "end": w["end"]}
-             for w in res["results"]["channels"][0]["alternatives"][0]["words"]]
-    return audio, align(a.text, heard)
+    audio = http(f"https://api.deepgram.com/v1/speak?model={a.voice}&encoding=mp3",
+                 json.dumps({"text": a.text}).encode(), {"Authorization": f"Token {key}", "Content-Type": "application/json"})
+    return audio, align(a.text, transcribe(audio, "audio/mpeg", a.lang))
+
+
+def to_mp3(wav):
+    """WAV bytes to MP3 with ffmpeg, installed or in Docker."""
+    import shutil, subprocess, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        src, dst = os.path.join(d, "in.wav"), os.path.join(d, "out.mp3")
+        open(src, "wb").write(wav)
+        if shutil.which("ffmpeg"):
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-b:a", "128k", dst]
+        else:
+            cmd = ["docker", "run", "--rm", "-u", f"{os.getuid()}:{os.getgid()}", "-v", f"{d}:{d}",
+                   os.environ.get("REC_FFMPEG_IMAGE", "jrottenberg/ffmpeg:6.1-alpine"),
+                   "-hide_banner", "-loglevel", "error", "-y", "-i", src, "-b:a", "128k", dst]
+        subprocess.run(cmd, check=True)
+        return open(dst, "rb").read()
+
+
+def gemini(a):
+    """Gemini TTS (Google AI Studio key). --style is a direction placed before the text
+    ("Say warmly, like …:"), which gemini-2.5-pro-preview-tts follows without reading aloud;
+    the newest TTS model reads any direction out, so it is not the default."""
+    import base64, io, wave
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        sys.exit("rec-tts: GEMINI_API_KEY is not set")
+    model = a.model or "gemini-2.5-pro-preview-tts"
+    prompt = f"{a.style} {a.text}" if a.style else a.text
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": a.voice}}}}}
+    res = json.loads(http(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                          json.dumps(body).encode(), {"Content-Type": "application/json", "x-goog-api-key": key}))
+    part = res["candidates"][0]["content"]["parts"][0]["inlineData"]
+    raw = base64.b64decode(part["data"])
+    if not part["mimeType"].startswith("audio/wav"):  # raw 16-bit PCM
+        rate = int(part["mimeType"].split("rate=")[1].split(";")[0]) if "rate=" in part["mimeType"] else 24000
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(raw)
+        raw = buf.getvalue()
+    heard = transcribe(raw, "audio/wav", a.lang)
+    if heard and " ".join(h["w"] for h in heard[:2]).lower().startswith("say"):
+        sys.exit("rec-tts: the model spoke the style direction aloud; use another model or drop --style")
+    return to_mp3(raw), align(a.text, heard)
 
 
 p = argparse.ArgumentParser()
-p.add_argument("--engine", default="edge", choices=["edge", "deepgram"])
+p.add_argument("--engine", default="edge", choices=["edge", "deepgram", "gemini"])
 for k in ("voice", "rate", "text", "mp3", "words"):
     p.add_argument("--" + k, required=True)
+p.add_argument("--style", default="", help="gemini: how to speak, e.g. 'Say warmly, like a teacher:'")
+p.add_argument("--model", default="", help="gemini: TTS model (default gemini-2.5-pro-preview-tts)")
+p.add_argument("--lang", default="en", help="language of the text, for the transcript that gives word times")
 args = p.parse_args()
-audio, words = asyncio.run(edge(args)) if args.engine == "edge" else deepgram(args)
+audio, words = asyncio.run(edge(args)) if args.engine == "edge" else deepgram(args) if args.engine == "deepgram" else gemini(args)
 open(args.mp3, "wb").write(audio)
 json.dump(words, open(args.words, "w"), indent=1)

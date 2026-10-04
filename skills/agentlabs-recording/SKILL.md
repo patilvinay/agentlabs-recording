@@ -180,6 +180,7 @@ returns the same audio twice, and every cue hangs on its word times);
 | `REC_RATE` | `+0%` | Edge speaking rate |
 | `REC_LIVE` | `1` | `0` records without speaking aloud |
 | `REC_TTS=deepgram` | | Deepgram Aura-2 voices (`REC_VOICE=aura-2-asteria-en`, …; American, British, Australian accents), needs `DEEPGRAM_API_KEY`; word times come from transcribing the audio with Nova-3 and matching it to the text. More natural than Edge, and stops rather than switching voice when it fails |
+| `rec-tts --engine gemini` | | Gemini TTS through a Google AI Studio key (`GEMINI_API_KEY`): very natural and directable (`--style "Say warmly, like a teacher:"`), English and Hindi (`--lang hi`). Use `gemini-2.5-pro-preview-tts` (the default): the newest TTS model reads any direction aloud. Word times from a Deepgram transcript; per-minute quotas are waited out |
 | `REC_FORCE` | `0` | `1` renders narration again even when the text is unchanged |
 | `REC_CHROME` | found | Chrome for `rec-animate` |
 | `REC_FFMPEG_IMAGE` | `jrottenberg/ffmpeg:6.1-alpine` | used when ffmpeg is not installed |
